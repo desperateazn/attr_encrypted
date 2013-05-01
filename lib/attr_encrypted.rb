@@ -100,20 +100,7 @@ module AttrEncrypted
     options = {
       :prefix           => 'encrypted_',
       :suffix           => '',
-      :if               => true,
-      :unless           => false,
-      :encode           => false,
-      :default_encoding => 'm',
-      :marshal          => false,
-      :marshaler        => Marshal,
-      :dump_method      => 'dump',
-      :load_method      => 'load',
-      :encryptor        => Encryptor,
-      :encrypt_method   => 'encrypt',
-      :decrypt_method   => 'decrypt'
     }.merge!(attr_encrypted_options).merge!(attributes.last.is_a?(Hash) ? attributes.pop : {})
-
-    options[:encode] = options[:default_encoding] if options[:encode] == true
 
     attributes.each do |attribute|
       encrypted_attribute_name = (options[:attribute] ? options[:attribute] : [options[:prefix], attribute, options[:suffix]].join).to_sym
@@ -174,16 +161,27 @@ module AttrEncrypted
   #   email = User.decrypt(:email, 'SOME_ENCRYPTED_EMAIL_STRING')
   def decrypt(attribute, encrypted_value, options = {})
     options = encrypted_attributes[attribute.to_sym].merge(options)
-    if options[:if] && !options[:unless] && !encrypted_value.nil? && !(encrypted_value.is_a?(String) && encrypted_value.empty?)
-      encrypted_value = encrypted_value.unpack(options[:encode]).first if options[:encode]
-      value = options[:encryptor].send(options[:decrypt_method], options.merge!(:value => encrypted_value))
-      if options[:marshal]
-        value = options[:marshaler].send(options[:load_method], value)
-      elsif defined?(Encoding)
-        encoding = Encoding.default_internal || Encoding.default_external
-        value = value.force_encoding(encoding.name)
-      end
-      value
+    if !encrypted_value.nil? && !(encrypted_value.is_a?(String) && encrypted_value.empty?) 
+	  ciphertext = encrypted_value
+  
+      cipher = OpenSSL::Cipher::Cipher.new('aes-256-cbc')
+      cipher.decrypt
+  
+      cipher_data = Base64.decode64(ciphertext)
+  
+      salt = cipher_data[0 .. 7]
+      iv = cipher_data[8 .. 23]
+      enc_data = cipher_data[24 .. -1]  # the rest
+     
+      key = OpenSSL::PKCS5.pbkdf2_hmac_sha1(options[:key], salt, 1024, 32)
+     
+      cipher.key = key
+      cipher.iv = iv
+  
+      plaintext = cipher.update(enc_data)
+      plaintext << cipher.final
+  
+      plaintext
     else
       encrypted_value
     end
@@ -200,11 +198,27 @@ module AttrEncrypted
   #   encrypted_email = User.encrypt(:email, 'test@example.com')
   def encrypt(attribute, value, options = {})
     options = encrypted_attributes[attribute.to_sym].merge(options)
-    if options[:if] && !options[:unless] && !value.nil? && !(value.is_a?(String) && value.empty?)
-      value = options[:marshal] ? options[:marshaler].send(options[:dump_method], value) : value.to_s
-      encrypted_value = options[:encryptor].send(options[:encrypt_method], options.merge!(:value => value))
-      encrypted_value = [encrypted_value].pack(options[:encode]) if options[:encode]
-      encrypted_value
+    if !value.nil? && !(value.is_a?(String) && value.empty?)
+	  plaintext = value.to_s
+
+      cipher = OpenSSL::Cipher::Cipher.new('aes-256-cbc')
+      cipher.encrypt
+  
+      iv = cipher.random_iv
+      salt = (0 ... 8).map{65.+(rand(25)).chr}.join   # random salt
+      key = OpenSSL::PKCS5.pbkdf2_hmac_sha1(options[:key], salt, 1024, 32)
+
+     
+      cipher.key = key
+      cipher.iv = iv
+  
+      enc_data = cipher.update(plaintext)
+      enc_data << cipher.final
+  
+      final_data = salt << iv << enc_data
+      encrypted_value = Base64.strict_encode64(final_data)
+	 
+	  encrypted_value
     else
       value
     end
